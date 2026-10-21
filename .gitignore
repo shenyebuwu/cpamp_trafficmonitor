@@ -1,0 +1,14 @@
+/upstream/
+/tools/
+/VERIFICATION.md
+/build/
+/build-cmake/
+/runtime/
+/dist/*
+!/dist/.gitkeep
+__pycache__/
+*.user
+.env
+.env.*
+settings.json
+secrets.bin

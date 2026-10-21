@@ -1,0 +1,45 @@
+name: Windows x64 Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Configure
+        run: cmake -S . -B build-cmake -A x64
+      - name: Build
+        run: cmake --build build-cmake --config Release
+      - name: Unit and plugin ABI tests
+        run: ctest --test-dir build-cmake -C Release --output-on-failure
+      - name: HTTP integration tests
+        shell: pwsh
+        run: |
+          $server = Start-Process python -ArgumentList 'tests/mock_server.py --port 18766' -PassThru -WindowStyle Hidden -RedirectStandardOutput mock.log -RedirectStandardError mock-error.log
+          try {
+            Start-Sleep -Seconds 2
+            if ($server.HasExited) { throw 'Mock server did not start' }
+            ./build-cmake/Release/CPAMPTests.exe http://127.0.0.1:18766
+            if ($LASTEXITCODE -ne 0) { throw 'HTTP integration tests failed' }
+          } finally {
+            if (!$server.HasExited) { Stop-Process -Id $server.Id }
+          }
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build-cmake/Release/CPAMPMonitor.dll dist/CPAMPMonitor.dll
+          ./scripts/package.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: CPAMPMonitor-x64
+          path: |
+            dist/CPAMPMonitor-x64.zip
+            dist/SHA256SUMS.txt

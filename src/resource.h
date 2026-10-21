@@ -1,0 +1,10 @@
+#define IDD_SETTINGS 101
+#define IDC_CONNECTIONS 1001
+#define IDC_NAME 1002
+#define IDC_URL 1003
+#define IDC_KEY 1004
+#define IDC_NEW 1005
+#define IDC_UPDATE 1006
+#define IDC_DELETE 1007
+#define IDC_REFRESH 1008
+#define IDC_STATUS 1009

@@ -1,0 +1,49 @@
+#include <windows.h>
+#include "resource.h"
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+IDD_SETTINGS DIALOGEX 0, 0, 365, 305
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "CPAMP - TrafficMonitor Plugin"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Manager Server connections", -1, 12, 10, 300, 12
+    LISTBOX IDC_CONNECTIONS, 12, 25, 341, 60, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT "Name", -1, 12, 96, 65, 12
+    EDITTEXT IDC_NAME, 80, 93, 273, 15, ES_AUTOHSCROLL
+    LTEXT "Server URL", -1, 12, 117, 65, 12
+    EDITTEXT IDC_URL, 80, 114, 273, 15, ES_AUTOHSCROLL
+    LTEXT "Admin Key", -1, 12, 138, 65, 12
+    EDITTEXT IDC_KEY, 80, 135, 273, 15, ES_PASSWORD | ES_AUTOHSCROLL
+    PUSHBUTTON "New", IDC_NEW, 12, 158, 60, 17
+    PUSHBUTTON "Apply connection", IDC_UPDATE, 80, 158, 95, 17
+    PUSHBUTTON "Delete", IDC_DELETE, 183, 158, 60, 17
+    LTEXT "Refresh interval (15-3600 seconds)", -1, 12, 190, 210, 12
+    EDITTEXT IDC_REFRESH, 260, 187, 93, 16, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT "Keys are encrypted with Windows DPAPI for the current user.\nTaskbar layout, font and startup are managed by TrafficMonitor.\nApply connection edits, then click Save to persist all changes.", -1, 12, 213, 341, 33
+    LTEXT "", IDC_STATUS, 12, 251, 341, 15
+    DEFPUSHBUTTON "Save", IDOK, 219, 276, 64, 18
+    PUSHBUTTON "Cancel", IDCANCEL, 290, 276, 63, 18
+END
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "FileDescription", "CPAMP Quota Monitor for TrafficMonitor"
+   VALUE "FileVersion", "1.0.0"
+   VALUE "ProductName", "CPAMP TrafficMonitor Plugin"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
