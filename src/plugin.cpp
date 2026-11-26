@@ -56,7 +56,7 @@ public:
         case TMI_DESCRIPTION: return L"Codex 5-hour remaining quota and local reset time from CPAMP Manager Server.";
         case TMI_AUTHOR: return L"CPAMP TrafficMonitor contributors";
         case TMI_COPYRIGHT: return L"Based on shenyebuwu/cpamp_monitor";
-        case TMI_VERSION: return L"1.0.0";
+        case TMI_VERSION: return L"1.0.1";
         case TMI_URL: return L"https://github.com/shenyebuwu/cpamp_monitor";
         default: return L"";
         }

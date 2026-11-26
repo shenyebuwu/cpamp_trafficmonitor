@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <ctime>
+#include <mutex>
 
 namespace cpamp {
 std::wstring Wide(const std::string& text) {
@@ -55,9 +56,39 @@ std::string Unhex(const std::string& text) {
     for (size_t i = 0; i < text.size(); i += 2) result += static_cast<char>((digit(text[i]) << 4) | digit(text[i + 1]));
     return result;
 }
+struct HttpFailure : std::runtime_error {
+    const char* stage;
+    DWORD code;
+    bool winhttp;
+    HttpFailure(const char* phase, DWORD error, bool network = true, unsigned attempts = 0)
+        : std::runtime_error(network ? "Network/TLS request failed (WinHTTP " + std::to_string(error) +
+            ", stage " + phase + ")" + (attempts ? " after " + std::to_string(attempts) + " attempt(s)" : "") :
+            "HTTP " + std::to_string(error)), stage(phase), code(error), winhttp(network) {}
+};
+// Diagnostic data is deliberately limited to fixed endpoint/phase names and numbers.
+// Never log URLs, connection names, administrator keys, headers or response bodies.
+void NetworkEvent(const char* endpoint, bool post, const char* stage, unsigned attempt,
+    DWORD code, ULONGLONG elapsed, bool recovered = false) noexcept {
+    try {
+        static std::mutex mutex;
+        std::lock_guard<std::mutex> lock(mutex);
+        auto path = ConfigPath().parent_path() / L"network.log";
+        std::filesystem::create_directories(path.parent_path());
+        if (std::filesystem::exists(path) && std::filesystem::file_size(path) >= 256 * 1024) {
+            auto previous = path; previous += L".1";
+            if (!MoveFileExW(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING)) return;
+        }
+        time_t now = time(nullptr); tm local{}; localtime_s(&local, &now);
+        char timestamp[32]{}; strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local);
+        std::ofstream stream(path, std::ios::binary | std::ios::app);
+        stream << timestamp << " " << (post ? "POST " : "GET ") << endpoint
+            << " stage=" << stage << " attempt=" << attempt << "/3 code=" << code
+            << " elapsed_ms=" << elapsed << " result=" << (recovered ? "recovered" : "failed") << "\n";
+    } catch (...) { /* A logging failure must not interrupt quota polling. */ }
+}
 struct HttpHandle {
     HINTERNET value = nullptr;
-    explicit HttpHandle(HINTERNET h) : value(h) { if (!h) throw std::runtime_error("Cannot initialize WinHTTP"); }
+    explicit HttpHandle(HINTERNET h, const char* stage) : value(h) { if (!h) throw HttpFailure(stage, GetLastError()); }
     ~HttpHandle() { WinHttpCloseHandle(value); }
     HttpHandle(const HttpHandle&) = delete;
 };
@@ -77,40 +108,79 @@ Url ParseUrl(const std::string& input) {
     return {std::wstring(parts.lpszHostName, parts.dwHostNameLength), std::wstring(parts.lpszUrlPath, parts.dwUrlPathLength),
         parts.nPort, parts.nScheme == INTERNET_SCHEME_HTTPS};
 }
-Json Request(const Connection& connection, const char* endpoint, const Json* body = nullptr) {
+void RequestTimeouts(HINTERNET handle, ULONGLONG deadline) {
+    const auto now = GetTickCount64();
+    if (now >= deadline) throw HttpFailure("deadline", ERROR_WINHTTP_TIMEOUT);
+    const int timeout = static_cast<int>((std::min)(deadline - now, ULONGLONG{6000}));
+    if (!WinHttpSetTimeouts(handle, (std::min)(timeout, 4000), (std::min)(timeout, 4000), timeout, timeout))
+        throw HttpFailure("timeouts", GetLastError());
+}
+Json RequestOnce(const Connection& connection, const char* endpoint, const Json* body, ULONGLONG deadline) {
     const auto url = ParseUrl(NormalizeUrl(connection.url) + "/" + endpoint);
     HttpHandle session(WinHttpOpen(L"CPAMP-TrafficMonitor/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    WinHttpSetTimeouts(session.value, 12000, 12000, 12000, 12000);
-    HttpHandle host(WinHttpConnect(session.value, url.host.c_str(), url.port, 0));
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0), "open");
+    RequestTimeouts(session.value, deadline);
+    HttpHandle host(WinHttpConnect(session.value, url.host.c_str(), url.port, 0), "connect");
     HttpHandle request(WinHttpOpenRequest(host.value, body ? L"POST" : L"GET", url.path.c_str(), nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0));
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0), "open_request");
     // Never forward administrator credentials through HTTP redirects.
     DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-    WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof(redirects));
+    if (!WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof(redirects)))
+        throw HttpFailure("redirect_policy", GetLastError());
     if (connection.key.find_first_of("\r\n") != std::string::npos) throw std::runtime_error("Invalid admin key");
     auto headers = Wide("Authorization: Bearer " + connection.key + "\r\nX-API-Key: " + connection.key +
         "\r\nAccept: application/json\r\nContent-Type: application/json\r\n");
     std::string payload = body ? body->dump() : "";
+    RequestTimeouts(request.value, deadline);
     if (!WinHttpSendRequest(request.value, headers.c_str(), static_cast<DWORD>(headers.size()),
         payload.empty() ? WINHTTP_NO_REQUEST_DATA : payload.data(), static_cast<DWORD>(payload.size()),
-        static_cast<DWORD>(payload.size()), 0) || !WinHttpReceiveResponse(request.value, nullptr))
-        throw std::runtime_error("Network/TLS request failed (WinHTTP " + std::to_string(GetLastError()) + ")");
+        static_cast<DWORD>(payload.size()), 0)) throw HttpFailure("send", GetLastError());
+    RequestTimeouts(request.value, deadline);
+    if (!WinHttpReceiveResponse(request.value, nullptr)) throw HttpFailure("receive", GetLastError());
     DWORD status = 0, length = sizeof(status);
-    WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX);
-    if (status < 200 || status >= 300) throw std::runtime_error("HTTP " + std::to_string(status));
+    if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX))
+        throw HttpFailure("headers", GetLastError());
+    if (status < 200 || status >= 300) throw HttpFailure("http_status", status, false);
     std::string response;
-    const auto deadline = GetTickCount64() + 20000;
+    const auto read_deadline = (std::min)(deadline, GetTickCount64() + 20000);
     for (;;) {
+        RequestTimeouts(request.value, read_deadline);
         char buffer[16384]; DWORD read = 0;
-        if (!WinHttpReadData(request.value, buffer, sizeof(buffer), &read)) throw std::runtime_error("Failed to read response");
+        if (!WinHttpReadData(request.value, buffer, sizeof(buffer), &read)) throw HttpFailure("read", GetLastError());
         if (!read) break;
         response.append(buffer, read);
-        if (response.size() > 8 * 1024 * 1024 || GetTickCount64() > deadline) throw std::runtime_error("Response exceeds size/time limit");
+        if (response.size() > 8 * 1024 * 1024 || GetTickCount64() > read_deadline) throw std::runtime_error("Response exceeds size/time limit");
     }
     auto json = Json::parse(response, nullptr, false);
     if (json.is_discarded()) throw std::runtime_error("Server returned invalid JSON");
     return json;
+}
+Json Request(const Connection& connection, const char* endpoint, const Json* body = nullptr) {
+    const auto started = GetTickCount64();
+    // The only POST eligible for replay is the existing read-only snapshot query.
+    const bool replayable = !body || std::string(endpoint) == "v0/management/quota-snapshots/query";
+    for (unsigned attempt = 1; ; ++attempt) {
+        try {
+            // A fresh session/connection/request also discards a broken HTTP connection.
+            auto result = RequestOnce(connection, endpoint, body, started + 30000);
+            if (attempt > 1) NetworkEvent(endpoint, body != nullptr, "complete", attempt, 0, GetTickCount64() - started, true);
+            return result;
+        } catch (const HttpFailure& error) {
+            const auto elapsed = GetTickCount64() - started;
+            NetworkEvent(endpoint, body != nullptr, error.stage, attempt, error.code, elapsed);
+            const bool transient = error.winhttp && (error.code == ERROR_WINHTTP_INVALID_SERVER_RESPONSE ||
+                error.code == ERROR_WINHTTP_CONNECTION_ERROR || error.code == ERROR_WINHTTP_RESEND_REQUEST ||
+                error.code == ERROR_WINHTTP_TIMEOUT || error.code == ERROR_WINHTTP_CANNOT_CONNECT);
+            if (!replayable || !transient || attempt == 3 || elapsed >= 30000) {
+                if (error.winhttp) throw HttpFailure(error.stage, error.code, true, attempt);
+                throw;
+            }
+            Sleep(attempt == 1 ? 250 : 750);
+        } catch (...) {
+            NetworkEvent(endpoint, body != nullptr, "response_or_config", attempt, 0, GetTickCount64() - started);
+            throw;
+        }
+    }
 }
 }
 
@@ -169,6 +239,11 @@ Status Fetch(const Connection& connection) {
             if (status.quota) return status;
             error = "No 5-hour quota found in snapshots";
         } else error = "No active Codex accounts found";
+    } catch (const HttpFailure& e) {
+        // A failed transport cannot tell us which API version the server supports.
+        // Do not spend more requests on legacy paths or obscure the primary error.
+        if (e.winhttp) { status.error = e.what(); return status; }
+        error = e.what();
     } catch (const std::exception& e) { error = e.what(); }
     for (const auto* endpoint : {"api/admin/manager-data", "api/v1/admin/manager-data"}) {
         try {

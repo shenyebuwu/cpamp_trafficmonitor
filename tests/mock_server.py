@@ -1,6 +1,8 @@
 """Local CPAMP fixtures. No real credentials or external services are used."""
 import json
 import threading
+import socket
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -19,6 +21,20 @@ def health():
 class Handler(BaseHTTPRequestHandler):
     lifecycle_requests = 0
     lifecycle_lock = threading.Lock()
+    retry_requests = {}
+    retry_lock = threading.Lock()
+
+    def attempt(self):
+        with Handler.retry_lock:
+            key = (self.command, self.path)
+            Handler.retry_requests[key] = Handler.retry_requests.get(key, 0) + 1
+            return Handler.retry_requests[key]
+
+    def invalid_response(self):
+        # A real malformed HTTP status line, rather than a mocked WinHTTP return code.
+        self.connection.sendall(b'HTTP/1.1 invalid-status\r\nContent-Length: 0\r\n\r\n')
+        self.close_connection = True
+        self.connection.shutdown(socket.SHUT_WR)
 
     def reply(self, code, data):
         payload = json.dumps(data).encode()
@@ -33,6 +49,34 @@ class Handler(BaseHTTPRequestHandler):
         scenario = path.split('/')[1]
         if self.headers.get("Authorization") != "Bearer integration-key" or self.headers.get("X-API-Key") != "integration-key":
             return self.reply(401, {})
+        if scenario in ('transient', 'persistent', 'no-retry', 'transient-timeout'):
+            attempt = self.attempt()
+            if scenario == 'transient-timeout' and attempt == 1:
+                time.sleep(9)
+                try:
+                    return self.reply(200, health())
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return
+            if scenario == 'persistent' or (scenario == 'transient' and attempt < 3):
+                return self.invalid_response()
+            if scenario == 'no-retry':
+                # A second attempt would incorrectly succeed, exposing accidental HTTP 401 retries.
+                return self.reply(401, {}) if attempt == 1 else self.reply(200, health())
+            return self.reply(200, health())
+        if scenario == 'retry-check':
+            with Handler.retry_lock:
+                expected = {
+                    ('GET', '/transient/v0/management/auth-files'): 3,
+                    ('GET', '/persistent/v0/management/auth-files'): 3,
+                    ('GET', '/transient-timeout/v0/management/auth-files'): 2,
+                    ('GET', '/no-retry/v0/management/auth-files'): 1,
+                    ('GET', '/no-retry/api/admin/manager-data'): 1,
+                    ('GET', '/no-retry/api/v1/admin/manager-data'): 1,
+                    ('POST', '/transient-post/v0/management/quota-snapshots/query'): 3,
+                }
+                valid = all(Handler.retry_requests.get(k) == n for k, n in expected.items()) and not any(
+                    key[1].startswith('/persistent/api/') for key in Handler.retry_requests)
+            return self.reply(200, health() if valid else {})
         if scenario == 'lifecycle':
             if not path.endswith('/v0/management/auth-files'):
                 return self.reply(401, {})
@@ -59,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith('/v0/management/auth-files'):
             if scenario in ('health', 'prefix', 'partial'):
                 return self.reply(200, health())
-            if scenario == 'snapshot':
+            if scenario in ('snapshot', 'transient-post'):
                 return self.reply(200, {"files": [{"provider": "codex", "name": "one.json"}, {"provider": "codex", "name": "two.json"}]})
             if scenario == 'empty':
                 return self.reply(200, {"files": []})
@@ -72,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != "Bearer integration-key":
             return self.reply(401, {})
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+        if self.path.startswith('/transient-post/') and self.attempt() < 3:
+            return self.invalid_response()
         if not self.path.endswith('/quota-snapshots/query') or len(body.get('accounts', [])) != 2:
             return self.reply(400, {})
         return self.reply(200, {"items": [{"windows": [{"window_kind": "five_hour", "remaining_percent": n,

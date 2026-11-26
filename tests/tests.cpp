@@ -101,6 +101,19 @@ int main(int argc, char** argv) {
             Check(!status.quota && status.error.find("302") != std::string::npos, "redirect is not followed");
             status = Fetch({"empty", base + "/empty", "integration-key"});
             Check(!status.quota, "no active accounts");
+            status = Fetch({"transient", base + "/transient", "integration-key"});
+            Check(status.quota && status.quota->remaining == 60, "recover after two malformed WinHTTP responses");
+            status = Fetch({"persistent", base + "/persistent", "integration-key"});
+            Check(!status.quota && status.error.find("12152") != std::string::npos &&
+                status.error.find("3 attempt(s)") != std::string::npos, "persistent 12152 has a finite retry limit");
+            status = Fetch({"no-retry", base + "/no-retry", "integration-key"});
+            Check(!status.quota && status.error.find("401") != std::string::npos, "do not retry authorization failures");
+            status = Fetch({"transient-post", base + "/transient-post", "integration-key"});
+            Check(status.quota && status.quota->remaining == 60, "read-only snapshot POST can recover");
+            status = Fetch({"transient-timeout", base + "/transient-timeout", "integration-key"});
+            Check(status.quota && status.quota->remaining == 60, "retry a transient receive timeout");
+            status = Fetch({"retry-check", base + "/retry-check", "integration-key"});
+            Check(status.quota.has_value(), "mock server verified exact attempt counts and no extra retries");
         }
         std::cout << "PASS: " << checks << " checks\n";
         return 0;
